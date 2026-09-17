@@ -20,8 +20,10 @@ const groqTools = aiTools.aiToolsDeclarations.map((tool) => ({
   }
 }));
 
+const GROQ_MODELS = ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "groq/compound"];
+
 /**
- * Generate AI Response with Groq (Qwen 3.8 / Llama) & Gemini + Google Tools & Memory
+ * Generate AI Response with Groq & Gemini + Google Tools & Memory
  */
 async function generateAIResponse(sessionId, userMessage) {
   if (!chatSessions[sessionId]) {
@@ -52,74 +54,79 @@ async function generateAIResponse(sessionId, userMessage) {
 
   const activeSystemPrompt = commandsSystem + memoryContext;
 
-  // 1. Prioritas Utama: Groq Ultra Fast Qwen 3.8 27B dengan Tool Calling
+  // 1. Prioritas Utama: Groq Ultra Fast dengan Tool Calling & Failover Model
   if (process.env.GROQ_API) {
-    try {
-      const messages = [
-        { role: "system", content: activeSystemPrompt },
-        ...sessionHistory.map((item) => ({
-          role: item.role,
-          content: item.content
-        }))
-      ];
+    const messages = [
+      { role: "system", content: activeSystemPrompt },
+      ...sessionHistory.map((item) => ({
+        role: item.role,
+        content: item.content
+      }))
+    ];
 
-      const completion = await groq.chat.completions.create({
-        model: "qwen/qwen3.8-27b",
-        messages: messages,
-        tools: groqTools,
-        tool_choice: "auto",
-        temperature: 0.7,
-        max_tokens: 2048
-      });
-
-      const choice = completion.choices[0];
-      const message = choice?.message;
-
-      // Cek apakah model meminta pemanggilan Tool
-      if (message && message.tool_calls && message.tool_calls.length > 0) {
-        const toolCall = message.tool_calls[0];
-        const functionName = toolCall.function.name;
-        let functionArgs = {};
-        try {
-          functionArgs = JSON.parse(toolCall.function.arguments);
-        } catch (e) {}
-
-        const toolResult = await aiTools.executeToolCall(functionName, functionArgs);
-
-        // Kirim hasil eksekusi tool kembali ke model untuk jawaban ramah
-        const followUpMessages = [
-          ...messages,
-          message,
-          {
-            role: "tool",
-            tool_call_id: toolCall.id,
-            name: functionName,
-            content: JSON.stringify(toolResult)
-          }
-        ];
-
-        const secondResponse = await groq.chat.completions.create({
-          model: "qwen/qwen3.8-27b",
-          messages: followUpMessages,
+    for (const modelName of GROQ_MODELS) {
+      try {
+        const completion = await groq.chat.completions.create({
+          model: modelName,
+          messages: messages,
+          tools: groqTools,
+          tool_choice: "auto",
           temperature: 0.7,
-          max_tokens: 2048
+          max_tokens: 600
         });
 
-        let finalReply = secondResponse.choices[0]?.message?.content || `Siap Bos Angeom, tugas ${functionName} berhasil diselesaikan.`;
-        finalReply = finalReply.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+        const choice = completion.choices[0];
+        const message = choice?.message;
 
-        sessionHistory.push({ role: "assistant", content: finalReply });
-        return finalReply;
-      }
+        // Cek apakah model meminta pemanggilan Tool
+        if (message && message.tool_calls && message.tool_calls.length > 0) {
+          const toolCall = message.tool_calls[0];
+          const functionName = toolCall.function.name;
+          let functionArgs = {};
+          try {
+            functionArgs = JSON.parse(toolCall.function.arguments);
+          } catch (e) {}
 
-      // Jika teks langsung
-      if (message && message.content) {
-        let reply = message.content.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
-        sessionHistory.push({ role: "assistant", content: reply });
-        return reply;
+          const toolResult = await aiTools.executeToolCall(functionName, functionArgs);
+
+          // Kirim hasil eksekusi tool kembali ke model untuk jawaban ramah
+          const followUpMessages = [
+            ...messages,
+            message,
+            {
+              role: "tool",
+              tool_call_id: toolCall.id,
+              name: functionName,
+              content: JSON.stringify(toolResult)
+            }
+          ];
+
+          const secondResponse = await groq.chat.completions.create({
+            model: modelName,
+            messages: followUpMessages,
+            temperature: 0.7,
+            max_tokens: 600
+          });
+
+          let finalReply =
+            secondResponse.choices[0]?.message?.content ||
+            `Siap Bos Angeom, tugas ${functionName} berhasil diselesaikan.`;
+          finalReply = finalReply.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+
+          sessionHistory.push({ role: "assistant", content: finalReply });
+          return finalReply;
+        }
+
+        // Jika teks langsung
+        if (message && message.content) {
+          let reply = message.content.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+          sessionHistory.push({ role: "assistant", content: reply });
+          return reply;
+        }
+      } catch (groqErr) {
+        console.warn(`[Groq Model ${modelName} Warning]:`, groqErr.message);
+        // Lanjut ke model berikutnya jika rate limit / token limit
       }
-    } catch (groqErr) {
-      console.error("[Groq Execution Error]:", groqErr.message);
     }
   }
 
@@ -135,7 +142,7 @@ async function generateAIResponse(sessionId, userMessage) {
         system_instruction: { parts: [{ text: activeSystemPrompt }] },
         contents: contents,
         tools: [{ function_declarations: aiTools.aiToolsDeclarations }],
-        generationConfig: { temperature: 0.7, maxOutputTokens: 2048 }
+        generationConfig: { temperature: 0.7, maxOutputTokens: 1024 }
       };
 
       const res = await fetch(

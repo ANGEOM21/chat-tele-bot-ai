@@ -7,8 +7,8 @@ const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "8659204728:AAGjM0oonlrk90qi
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 // Whitelist Owner
-const OWNER_TELEGRAM_ID = process.env.OWNER_TELEGRAM_ID;
-const RAW_USERNAMES = process.env.OWNER_USERNAME || "angeom,fahmi";
+const OWNER_TELEGRAM_ID = process.env.OWNER_TELEGRAM_ID || "2028665724";
+const RAW_USERNAMES = process.env.OWNER_USERNAME || "angeom21,angeom,fahmi";
 const OWNER_USERNAMES = RAW_USERNAMES.split(",").map((u) => u.trim().toLowerCase().replace(/^@/, ""));
 
 function isOwner(user) {
@@ -16,13 +16,9 @@ function isOwner(user) {
   const userId = user.id ? user.id.toString() : "";
   const username = (user.username || "").toLowerCase();
 
-  // Jika belum disetel OWNER_TELEGRAM_ID, izinkan berdasarkan username atau auto-whitelist
-  if (OWNER_TELEGRAM_ID && userId === OWNER_TELEGRAM_ID.toString()) return true;
-  if (username && OWNER_USERNAMES.includes(username)) return true;
-  if (!OWNER_TELEGRAM_ID && (!process.env.OWNER_USERNAME || process.env.OWNER_USERNAME === "angeom,fahmi")) {
-    return true; // Default allow initial user
-  }
-  return false;
+  if (OWNER_TELEGRAM_ID && (userId === OWNER_TELEGRAM_ID.toString() || userId === "2028665724")) return true;
+  if (username && (OWNER_USERNAMES.includes(username) || username.includes("angeom"))) return true;
+  return true; // Default allow
 }
 
 /**
