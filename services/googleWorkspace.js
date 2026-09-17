@@ -36,7 +36,15 @@ async function handleAuthCallback(code) {
 }
 
 async function getAuthenticatedClient() {
-  const tokens = await memoryEngine.getGoogleTokens();
+  let tokens = await memoryEngine.getGoogleTokens();
+
+  // Jika belum ada di memory file tapi ada di Environment Variables (Vercel Permanent)
+  if (!tokens && process.env.GOOGLE_REFRESH_TOKEN) {
+    tokens = {
+      refresh_token: process.env.GOOGLE_REFRESH_TOKEN
+    };
+  }
+
   if (!tokens) return null;
 
   const oauth2Client = getOAuth2Client();
