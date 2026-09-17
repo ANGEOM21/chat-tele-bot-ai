@@ -18,6 +18,7 @@ app.use(express.static(path.join(__dirname, "public")));
 
 // Webhook & OAuth Endpoints
 app.all("/api/telegram", telegramWebhookHandler);
+app.get("/auth/google", (req, res) => res.redirect(googleWorkspace.getAuthUrl()));
 app.all("/oauth2callback", oauth2CallbackHandler);
 
 // API Status

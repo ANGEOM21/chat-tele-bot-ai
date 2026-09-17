@@ -6,6 +6,10 @@
       "destination": "/api/telegram.js"
     },
     {
+      "source": "/auth/google",
+      "destination": "/api/auth.js"
+    },
+    {
       "source": "/oauth2callback",
       "destination": "/api/oauth2callback.js"
     },
