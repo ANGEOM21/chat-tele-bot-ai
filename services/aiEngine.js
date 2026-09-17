@@ -10,7 +10,7 @@ const groq = new Groq({
 
 const chatSessions = {};
 
-// Convert tools to Groq format
+// Convert tools to Groq standard format
 const groqTools = aiTools.aiToolsDeclarations.map((tool) => ({
   type: "function",
   function: {
@@ -20,55 +20,11 @@ const groqTools = aiTools.aiToolsDeclarations.map((tool) => ({
   }
 }));
 
-const GROQ_MODELS = ["openai/gpt-oss-120b", "groq/compound", "qwen/qwen3.8-27b"];
+// Models on Groq that fully support OpenAI-compatible tool calling
+const GROQ_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"];
 
 /**
- * Parser khusus untuk mendeteksi pemanggilan tool dalam bentuk XML tag jika model mengeluarkannya sebagai teks
- */
-function parseXmlToolCall(content) {
-  if (!content) return null;
-  const match = content.match(
-    /<toolcall>[\s\S]*?<function=([a-zA-Z0-9_]+)>([\s\S]*?)<\/function>[\s\S]*?<\/toolcall>/i
-  );
-  if (!match) return null;
-
-  const rawFnName = match[1].trim();
-  const rawParams = match[2];
-
-  const params = {};
-  const paramRegex = /<parameter=([a-zA-Z0-9_]+)>([\s\S]*?)<\/parameter>/gi;
-  let pMatch;
-  while ((pMatch = paramRegex.exec(rawParams)) !== null) {
-    const pName = pMatch[1].trim();
-    let pVal = pMatch[2].trim();
-    try {
-      if (pVal.startsWith("[") || pVal.startsWith("{")) {
-        pVal = JSON.parse(pVal);
-      }
-    } catch (e) {}
-    params[pName] = pVal;
-  }
-
-  // Normalisasi nama fungsi jika underscore hilang (misal: sheetscreatespreadsheet -> sheets_create_spreadsheet)
-  let fnName = rawFnName;
-  for (const decl of aiTools.aiToolsDeclarations) {
-    if (decl.name.replace(/_/g, "").toLowerCase() === rawFnName.replace(/_/g, "").toLowerCase()) {
-      fnName = decl.name;
-      break;
-    }
-  }
-
-  const cleanPrefix = content.replace(/<toolcall>[\s\S]*?<\/toolcall>/gi, "").trim();
-
-  return {
-    name: fnName,
-    args: params,
-    cleanPrefix
-  };
-}
-
-/**
- * Bersihkan sisa tag teknis dari pesan akhir
+ * Pembersih tag teknis agar respon selalu ramah dan rapi
  */
 function cleanOutput(text) {
   if (!text) return "";
@@ -80,7 +36,49 @@ function cleanOutput(text) {
 }
 
 /**
- * Generate AI Response with Groq & Gemini + Google Tools & Memory
+ * Parse XML toolcall jika ada model open-source yang mengeluarkan pseudo-tags
+ */
+function parseAnyXmlToolCall(content) {
+  if (!content || !content.includes("<toolcall>")) return null;
+
+  // Pattern 1: <toolcall><function=name><parameter=key>value</parameter></function></toolcall>
+  const matchWithFn = content.match(
+    /<toolcall>[\s\S]*?<function=([a-zA-Z0-9_]+)>([\s\S]*?)<\/function>[\s\S]*?<\/toolcall>/i
+  );
+  if (matchWithFn) {
+    const rawFn = matchWithFn[1].trim();
+    const rawParams = matchWithFn[2];
+    const params = {};
+    const paramRegex = /<parameter=([a-zA-Z0-9_]+)>([\s\S]*?)<\/parameter>/gi;
+    let p;
+    while ((p = paramRegex.exec(rawParams)) !== null) {
+      params[p[1].trim()] = p[2].trim();
+    }
+    let fnName = rawFn;
+    for (const decl of aiTools.aiToolsDeclarations) {
+      if (decl.name.replace(/_/g, "").toLowerCase() === rawFn.replace(/_/g, "").toLowerCase()) {
+        fnName = decl.name;
+        break;
+      }
+    }
+    return { name: fnName, args: params };
+  }
+
+  // Pattern 2: <toolcall>Title or Text</toolcall> (Hallucinated short tag for spreadsheet)
+  const simpleMatch = content.match(/<toolcall>([\s\S]*?)<\/toolcall>/i);
+  if (simpleMatch) {
+    const insideText = simpleMatch[1].trim();
+    return {
+      name: "sheets_create_spreadsheet",
+      args: { title: insideText || "Pembukuan Keuangan - Angeom" }
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Generate AI Response with Groq (GPT-OSS-120B / Qwen) & Gemini + Google Tools & Memory
  */
 async function generateAIResponse(sessionId, userMessage) {
   if (!chatSessions[sessionId]) {
@@ -111,7 +109,7 @@ async function generateAIResponse(sessionId, userMessage) {
 
   const activeSystemPrompt = commandsSystem + memoryContext;
 
-  // 1. Prioritas Utama: Groq Ultra Fast dengan Tool Calling & Fallback
+  // 1. Prioritas Utama: Groq Ultra Fast dengan Tool Calling Resmi
   if (process.env.GROQ_API) {
     const messages = [
       { role: "system", content: activeSystemPrompt },
@@ -135,7 +133,7 @@ async function generateAIResponse(sessionId, userMessage) {
         const choice = completion.choices[0];
         const message = choice?.message;
 
-        // A. Handle Structured Tool Call (OpenAI Standard)
+        // A. Standard Function / Tool Call
         if (message && message.tool_calls && message.tool_calls.length > 0) {
           const toolCall = message.tool_calls[0];
           const functionName = toolCall.function.name;
@@ -173,19 +171,19 @@ async function generateAIResponse(sessionId, userMessage) {
           return finalReply;
         }
 
-        // B. Handle Raw XML Tool Call (jika model seperti Qwen mengeluarkan tag <toolcall>)
+        // B. Handle Raw Pseudo XML Tool Call if any model emits it
         if (message && message.content && message.content.includes("<toolcall>")) {
-          const xmlTool = parseXmlToolCall(message.content);
+          const xmlTool = parseAnyXmlToolCall(message.content);
           if (xmlTool) {
             console.log(`[XML TOOL INTERCEPT] ⚡ Mengeksekusi ${xmlTool.name} dari XML tag...`);
             const toolResult = await aiTools.executeToolCall(xmlTool.name, xmlTool.args);
 
             const followUpMessages = [
               ...messages,
-              { role: "assistant", content: xmlTool.cleanPrefix || "Mengeksekusi tool..." },
+              { role: "assistant", content: "Mengeksekusi perintah Bos..." },
               {
                 role: "user",
-                content: `[Hasil Eksekusi Tool ${xmlTool.name}]: ${JSON.stringify(toolResult)}\n\nBerikan balasan konfirmasi yang ramah kepada Bos Angeom tanpa menampilkan tag teknis/XML.`
+                content: `[Hasil Eksekusi Tool ${xmlTool.name}]: ${JSON.stringify(toolResult)}\n\nBerikan balasan konfirmasi yang ramah, rapi dalam tabel Markdown kepada Bos Angeom tanpa menampilkan tag teknis/XML.`
               }
             ];
 
@@ -206,19 +204,19 @@ async function generateAIResponse(sessionId, userMessage) {
           }
         }
 
-        // C. Teks Langsung Biasa
+        // C. Normal Text Output
         if (message && message.content) {
           let reply = cleanOutput(message.content);
           sessionHistory.push({ role: "assistant", content: reply });
           return reply;
         }
       } catch (groqErr) {
-        console.warn(`[Groq Model ${modelName} Warning]:`, groqErr.message);
+        console.warn(`[Groq Model ${modelName} Notice]:`, groqErr.message);
       }
     }
   }
 
-  // 2. Fallback: Google Gemini jika disetel API key-nya
+  // 2. Fallback: Google Gemini
   if (process.env.GEMINI_API_KEY) {
     try {
       const contents = sessionHistory.map((item) => ({
@@ -254,7 +252,7 @@ async function generateAIResponse(sessionId, userMessage) {
           ...contents,
           {
             role: "user",
-            parts: [{ text: `[Hasil Eksekusi Tool ${name}]: ${JSON.stringify(toolResult)}\n\nJawablah dengan ramah dan lengkap.` }]
+            parts: [{ text: `[Hasil Eksekusi Tool ${name}]: ${JSON.stringify(toolResult)}\n\nJawablah dengan ramah dan rapi.` }]
           }
         ];
 
