@@ -1,0 +1,20 @@
+{
+  "name": "chat-tele-bot-ai",
+  "version": "1.0.0",
+  "description": "Super Asisten AI Pribadi Bos Angeom - Telegram Bot dengan Google Workspace & AI Groq/Gemini di Vercel Serverless",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "keywords": ["telegram-bot", "ai", "groq", "gemini", "google-workspace", "vercel-serverless"],
+  "author": "Angeom & Antigravity AI",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "googleapis": "^144.0.0",
+    "groq-sdk": "^0.15.0"
+  }
+}
