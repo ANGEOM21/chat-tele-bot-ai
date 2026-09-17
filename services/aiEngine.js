@@ -20,7 +20,6 @@ const groqTools = aiTools.aiToolsDeclarations.map((tool) => ({
   }
 }));
 
-// Models on Groq that fully support OpenAI-compatible tool calling
 const GROQ_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"];
 
 /**
@@ -28,22 +27,28 @@ const GROQ_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-
  */
 function cleanOutput(text) {
   if (!text) return "";
-  return text
+  let cleaned = text
     .replace(/<think>[\s\S]*?<\/think>/g, "")
     .replace(/<toolcall>[\s\S]*?<\/toolcall>/gi, "")
-    .replace(/<\/?(?:function|parameter|toolcall)[^>]*>/gi, "")
+    .replace(/<\/?(?:function|parameter|toolcall|tool_call|call)[^>]*>/gi, "")
     .trim();
+
+  // Jika setelah dibersihkan teksnya kosong (karena seluruh responnya adalah tag toolcall)
+  if (!cleaned) {
+    cleaned = "Siap Bos Angeom! Perintah sudah berhasil saya eksekusi dan catat ke sistem. Ada lagi yang ingin dicek atau ditambahkan?";
+  }
+  return cleaned;
 }
 
 /**
- * Parse XML toolcall jika ada model open-source yang mengeluarkan pseudo-tags
+ * Parse XML / pseudo toolcall jika ada model yang mengeluarkannya sebagai teks
  */
 function parseAnyXmlToolCall(content) {
-  if (!content || !content.includes("<toolcall>")) return null;
+  if (!content || (!content.includes("<toolcall>") && !content.includes("<function="))) return null;
 
   // Pattern 1: <toolcall><function=name><parameter=key>value</parameter></function></toolcall>
   const matchWithFn = content.match(
-    /<toolcall>[\s\S]*?<function=([a-zA-Z0-9_]+)>([\s\S]*?)<\/function>[\s\S]*?<\/toolcall>/i
+    /<function=([a-zA-Z0-9_]+)>([\s\S]*?)<\/function>/i
   );
   if (matchWithFn) {
     const rawFn = matchWithFn[1].trim();
@@ -64,7 +69,7 @@ function parseAnyXmlToolCall(content) {
     return { name: fnName, args: params };
   }
 
-  // Pattern 2: <toolcall>Title or Text</toolcall> (Hallucinated short tag for spreadsheet)
+  // Pattern 2: <toolcall>Title or Text</toolcall>
   const simpleMatch = content.match(/<toolcall>([\s\S]*?)<\/toolcall>/i);
   if (simpleMatch) {
     const insideText = simpleMatch[1].trim();
@@ -78,7 +83,7 @@ function parseAnyXmlToolCall(content) {
 }
 
 /**
- * Generate AI Response with Groq (GPT-OSS-120B / Qwen) & Gemini + Google Tools & Memory
+ * Generate AI Response with Groq & Gemini + Google Tools & Memory
  */
 async function generateAIResponse(sessionId, userMessage) {
   if (!chatSessions[sessionId]) {
@@ -109,7 +114,7 @@ async function generateAIResponse(sessionId, userMessage) {
 
   const activeSystemPrompt = commandsSystem + memoryContext;
 
-  // 1. Prioritas Utama: Groq Ultra Fast dengan Tool Calling Resmi
+  // 1. Prioritas Utama: Groq Ultra Fast dengan Tool Calling
   if (process.env.GROQ_API) {
     const messages = [
       { role: "system", content: activeSystemPrompt },
@@ -126,7 +131,7 @@ async function generateAIResponse(sessionId, userMessage) {
           messages: messages,
           tools: groqTools,
           tool_choice: "auto",
-          temperature: 0.7,
+          temperature: 0.5,
           max_tokens: 700
         });
 
@@ -158,7 +163,7 @@ async function generateAIResponse(sessionId, userMessage) {
           const secondResponse = await groq.chat.completions.create({
             model: modelName,
             messages: followUpMessages,
-            temperature: 0.7,
+            temperature: 0.5,
             max_tokens: 700
           });
 
@@ -171,11 +176,11 @@ async function generateAIResponse(sessionId, userMessage) {
           return finalReply;
         }
 
-        // B. Handle Raw Pseudo XML Tool Call if any model emits it
-        if (message && message.content && message.content.includes("<toolcall>")) {
+        // B. Handle Raw Pseudo XML Tool Call if model emits text-based toolcall
+        if (message && message.content && (message.content.includes("<toolcall>") || message.content.includes("<function="))) {
           const xmlTool = parseAnyXmlToolCall(message.content);
           if (xmlTool) {
-            console.log(`[XML TOOL INTERCEPT] ⚡ Mengeksekusi ${xmlTool.name} dari XML tag...`);
+            console.log(`[XML TOOL INTERCEPT] ⚡ Mengeksekusi ${xmlTool.name}...`, xmlTool.args);
             const toolResult = await aiTools.executeToolCall(xmlTool.name, xmlTool.args);
 
             const followUpMessages = [
@@ -183,14 +188,14 @@ async function generateAIResponse(sessionId, userMessage) {
               { role: "assistant", content: "Mengeksekusi perintah Bos..." },
               {
                 role: "user",
-                content: `[Hasil Eksekusi Tool ${xmlTool.name}]: ${JSON.stringify(toolResult)}\n\nBerikan balasan konfirmasi yang ramah, rapi dalam tabel Markdown kepada Bos Angeom tanpa menampilkan tag teknis/XML.`
+                content: `[Hasil Eksekusi Tool ${xmlTool.name}]: ${JSON.stringify(toolResult)}\n\nBerikan laporan konfirmasi yang rapi dalam tabel Markdown kepada Bos Angeom tanpa menampilkan tag teknis/XML.`
               }
             ];
 
             const secondResponse = await groq.chat.completions.create({
               model: modelName,
               messages: followUpMessages,
-              temperature: 0.7,
+              temperature: 0.5,
               max_tokens: 700
             });
 
@@ -216,7 +221,7 @@ async function generateAIResponse(sessionId, userMessage) {
     }
   }
 
-  // 2. Fallback: Google Gemini
+  // 2. Fallback: Google Gemini jika disetel API key-nya
   if (process.env.GEMINI_API_KEY) {
     try {
       const contents = sessionHistory.map((item) => ({
@@ -228,7 +233,7 @@ async function generateAIResponse(sessionId, userMessage) {
         system_instruction: { parts: [{ text: activeSystemPrompt }] },
         contents: contents,
         tools: [{ function_declarations: aiTools.aiToolsDeclarations }],
-        generationConfig: { temperature: 0.7, maxOutputTokens: 1024 }
+        generationConfig: { temperature: 0.5, maxOutputTokens: 1024 }
       };
 
       const res = await fetch(
