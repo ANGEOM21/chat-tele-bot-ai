@@ -10,6 +10,10 @@
       "destination": "/api/status.js"
     },
     {
+      "source": "/api/set_webhook",
+      "destination": "/api/set_webhook.js"
+    },
+    {
       "source": "/auth/google",
       "destination": "/api/auth.js"
     },
