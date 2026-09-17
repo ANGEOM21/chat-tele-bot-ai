@@ -20,7 +20,64 @@ const groqTools = aiTools.aiToolsDeclarations.map((tool) => ({
   }
 }));
 
-const GROQ_MODELS = ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "groq/compound"];
+const GROQ_MODELS = ["openai/gpt-oss-120b", "groq/compound", "qwen/qwen3.8-27b"];
+
+/**
+ * Parser khusus untuk mendeteksi pemanggilan tool dalam bentuk XML tag jika model mengeluarkannya sebagai teks
+ */
+function parseXmlToolCall(content) {
+  if (!content) return null;
+  const match = content.match(
+    /<toolcall>[\s\S]*?<function=([a-zA-Z0-9_]+)>([\s\S]*?)<\/function>[\s\S]*?<\/toolcall>/i
+  );
+  if (!match) return null;
+
+  const rawFnName = match[1].trim();
+  const rawParams = match[2];
+
+  const params = {};
+  const paramRegex = /<parameter=([a-zA-Z0-9_]+)>([\s\S]*?)<\/parameter>/gi;
+  let pMatch;
+  while ((pMatch = paramRegex.exec(rawParams)) !== null) {
+    const pName = pMatch[1].trim();
+    let pVal = pMatch[2].trim();
+    try {
+      if (pVal.startsWith("[") || pVal.startsWith("{")) {
+        pVal = JSON.parse(pVal);
+      }
+    } catch (e) {}
+    params[pName] = pVal;
+  }
+
+  // Normalisasi nama fungsi jika underscore hilang (misal: sheetscreatespreadsheet -> sheets_create_spreadsheet)
+  let fnName = rawFnName;
+  for (const decl of aiTools.aiToolsDeclarations) {
+    if (decl.name.replace(/_/g, "").toLowerCase() === rawFnName.replace(/_/g, "").toLowerCase()) {
+      fnName = decl.name;
+      break;
+    }
+  }
+
+  const cleanPrefix = content.replace(/<toolcall>[\s\S]*?<\/toolcall>/gi, "").trim();
+
+  return {
+    name: fnName,
+    args: params,
+    cleanPrefix
+  };
+}
+
+/**
+ * Bersihkan sisa tag teknis dari pesan akhir
+ */
+function cleanOutput(text) {
+  if (!text) return "";
+  return text
+    .replace(/<think>[\s\S]*?<\/think>/g, "")
+    .replace(/<toolcall>[\s\S]*?<\/toolcall>/gi, "")
+    .replace(/<\/?(?:function|parameter|toolcall)[^>]*>/gi, "")
+    .trim();
+}
 
 /**
  * Generate AI Response with Groq & Gemini + Google Tools & Memory
@@ -54,7 +111,7 @@ async function generateAIResponse(sessionId, userMessage) {
 
   const activeSystemPrompt = commandsSystem + memoryContext;
 
-  // 1. Prioritas Utama: Groq Ultra Fast dengan Tool Calling & Failover Model
+  // 1. Prioritas Utama: Groq Ultra Fast dengan Tool Calling & Fallback
   if (process.env.GROQ_API) {
     const messages = [
       { role: "system", content: activeSystemPrompt },
@@ -72,13 +129,13 @@ async function generateAIResponse(sessionId, userMessage) {
           tools: groqTools,
           tool_choice: "auto",
           temperature: 0.7,
-          max_tokens: 600
+          max_tokens: 700
         });
 
         const choice = completion.choices[0];
         const message = choice?.message;
 
-        // Cek apakah model meminta pemanggilan Tool
+        // A. Handle Structured Tool Call (OpenAI Standard)
         if (message && message.tool_calls && message.tool_calls.length > 0) {
           const toolCall = message.tool_calls[0];
           const functionName = toolCall.function.name;
@@ -89,7 +146,6 @@ async function generateAIResponse(sessionId, userMessage) {
 
           const toolResult = await aiTools.executeToolCall(functionName, functionArgs);
 
-          // Kirim hasil eksekusi tool kembali ke model untuk jawaban ramah
           const followUpMessages = [
             ...messages,
             message,
@@ -105,27 +161,59 @@ async function generateAIResponse(sessionId, userMessage) {
             model: modelName,
             messages: followUpMessages,
             temperature: 0.7,
-            max_tokens: 600
+            max_tokens: 700
           });
 
           let finalReply =
             secondResponse.choices[0]?.message?.content ||
             `Siap Bos Angeom, tugas ${functionName} berhasil diselesaikan.`;
-          finalReply = finalReply.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+          finalReply = cleanOutput(finalReply);
 
           sessionHistory.push({ role: "assistant", content: finalReply });
           return finalReply;
         }
 
-        // Jika teks langsung
+        // B. Handle Raw XML Tool Call (jika model seperti Qwen mengeluarkan tag <toolcall>)
+        if (message && message.content && message.content.includes("<toolcall>")) {
+          const xmlTool = parseXmlToolCall(message.content);
+          if (xmlTool) {
+            console.log(`[XML TOOL INTERCEPT] ⚡ Mengeksekusi ${xmlTool.name} dari XML tag...`);
+            const toolResult = await aiTools.executeToolCall(xmlTool.name, xmlTool.args);
+
+            const followUpMessages = [
+              ...messages,
+              { role: "assistant", content: xmlTool.cleanPrefix || "Mengeksekusi tool..." },
+              {
+                role: "user",
+                content: `[Hasil Eksekusi Tool ${xmlTool.name}]: ${JSON.stringify(toolResult)}\n\nBerikan balasan konfirmasi yang ramah kepada Bos Angeom tanpa menampilkan tag teknis/XML.`
+              }
+            ];
+
+            const secondResponse = await groq.chat.completions.create({
+              model: modelName,
+              messages: followUpMessages,
+              temperature: 0.7,
+              max_tokens: 700
+            });
+
+            let finalReply =
+              secondResponse.choices[0]?.message?.content ||
+              `Siap Bos Angeom, ${xmlTool.name} berhasil dijalankan.`;
+            finalReply = cleanOutput(finalReply);
+
+            sessionHistory.push({ role: "assistant", content: finalReply });
+            return finalReply;
+          }
+        }
+
+        // C. Teks Langsung Biasa
         if (message && message.content) {
-          let reply = message.content.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+          let reply = cleanOutput(message.content);
           sessionHistory.push({ role: "assistant", content: reply });
           return reply;
         }
       } catch (groqErr) {
         console.warn(`[Groq Model ${modelName} Warning]:`, groqErr.message);
-        // Lanjut ke model berikutnya jika rate limit / token limit
       }
     }
   }
@@ -183,14 +271,14 @@ async function generateAIResponse(sessionId, userMessage) {
         );
 
         const followUpData = await followUpRes.json();
-        const reply = followUpData.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || `Siap Bos Angeom, tugas ${name} berhasil.`;
+        const reply = cleanOutput(followUpData.candidates?.[0]?.content?.parts?.[0]?.text || `Siap Bos Angeom, tugas ${name} berhasil.`);
         sessionHistory.push({ role: "assistant", content: reply });
         return reply;
       }
 
       const textPart = modelParts.find((p) => p.text);
       if (textPart && textPart.text) {
-        const reply = textPart.text.trim();
+        const reply = cleanOutput(textPart.text);
         sessionHistory.push({ role: "assistant", content: reply });
         return reply;
       }
