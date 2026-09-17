@@ -4,7 +4,7 @@ const memoryEngine = require("./memoryEngine");
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const REDIRECT_URI =
-  process.env.GOOGLE_REDIRECT_URI || "https://angeom-assistant.vercel.app/oauth2callback";
+  process.env.GOOGLE_REDIRECT_URI || "https://chat-tele-bot-ai.vercel.app/oauth2callback";
 
 const SCOPES = [
   "https://www.googleapis.com/auth/calendar",
